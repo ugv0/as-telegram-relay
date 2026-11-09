@@ -9,7 +9,7 @@ on:
 
 concurrency:
   group: as-telegram-relay-singleton
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   relay-service:

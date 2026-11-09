@@ -210,6 +210,7 @@ app.all(["/api/telegram", "/profile"], async (req, res) => {
 // 3. Realtime Messaging Relay & In-Memory SSE Event Stream
 // ---------------------------------------------------------------------------
 const RECENT_MESSAGES = [];
+const RELAY_CHATS = new Map(); // chatId -> array of messages
 
 app.get("/api/msg/events", (req, res) => {
   res.setHeader("Content-Type", "text/event-stream");
@@ -225,6 +226,51 @@ app.get("/api/msg/events", (req, res) => {
   });
 });
 
+app.post(["/api/msg/send_message", "/api/msg/send"], (req, res) => {
+  const msg = req.body?.message || req.body;
+  const chatId = msg?.chatId || req.body?.chatId;
+  if (!msg || !chatId) return res.status(400).json({ error: "Missing message or chatId" });
+
+  const record = {
+    ...msg,
+    chatId,
+    receivedAt: Date.now(),
+  };
+
+  if (!RELAY_CHATS.has(chatId)) RELAY_CHATS.set(chatId, []);
+  const list = RELAY_CHATS.get(chatId);
+  list.push(record);
+  if (list.length > 200) list.shift();
+
+  RECENT_MESSAGES.push(record);
+  if (RECENT_MESSAGES.length > 500) RECENT_MESSAGES.shift();
+
+  // Broadcast to all active clients
+  const payload = JSON.stringify({ type: "new_message", data: record });
+  for (const client of sseClients) {
+    try {
+      client.write(`data: ${payload}\n\n`);
+    } catch (_) {}
+  }
+
+  res.json({ status: "ok", message: record });
+});
+
+app.get(["/api/msg/get_messages", "/api/msg/messages"], (req, res) => {
+  const chatId = req.query.chatId;
+  if (!chatId) return res.status(400).json({ error: "Missing chatId" });
+  const messages = RELAY_CHATS.get(chatId) || [];
+  res.json({ status: "ok", messages });
+});
+
+app.get("/api/msg/sync", (req, res) => {
+  const chatId = req.query.chatId;
+  const since = parseInt(req.query.since || "0", 10);
+  const msgs = RELAY_CHATS.get(chatId) || [];
+  const newMessages = since > 0 ? msgs.filter((m) => m.timestamp > since) : msgs;
+  res.json({ status: "ok", chatId, newMessages, timestamp: Date.now() });
+});
+
 app.post("/api/msg/sync", (req, res) => {
   const { message, chatId } = req.body || {};
   if (!message) return res.status(400).json({ error: "Missing message payload" });
@@ -234,6 +280,13 @@ app.post("/api/msg/sync", (req, res) => {
     chatId: chatId || "global",
     receivedAt: Date.now(),
   };
+
+  if (chatId) {
+    if (!RELAY_CHATS.has(chatId)) RELAY_CHATS.set(chatId, []);
+    const list = RELAY_CHATS.get(chatId);
+    list.push(record);
+    if (list.length > 200) list.shift();
+  }
 
   RECENT_MESSAGES.push(record);
   if (RECENT_MESSAGES.length > 500) RECENT_MESSAGES.shift();
