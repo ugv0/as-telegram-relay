@@ -1,0 +1,65 @@
+name: 5-Hour Continuous Service (as-telegram-relay)
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+  schedule:
+    - cron: '0 */5 * * *'
+
+concurrency:
+  group: as-telegram-relay-singleton
+  cancel-in-progress: false
+
+jobs:
+  relay-service:
+    name: Run as-telegram-relay Supervisor (5h Cycle)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    timeout-minutes: 350
+
+    env:
+      HOST: "0.0.0.0"
+      PORT: "8000"
+      RESTART_INTERVAL_SECONDS: "18000"
+      GH_PAT: ${{ secrets.GH_PAT }}
+      TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+      TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+      TELEGRAM_SESSION: ${{ secrets.TELEGRAM_SESSION }}
+      TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+
+    steps:
+      - name: 1. Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: 2. Set up Node.js 20 & Python 3.11
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 2b. Set up Python for Retrigger Script
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 3. Install Cloudflared & Dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq curl build-essential
+          curl -L --output cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared.deb
+          rm cloudflared.deb
+          npm install
+          python -m pip install requests
+
+      - name: 4. Start Managed Server & Tunnel (~5-Hour Active Session)
+        run: |
+          chmod +x scripts/start_server.sh
+          ./scripts/start_server.sh
+
+      - name: 5. Retrigger Next 5-Hour Cycle
+        if: always()
+        run: |
+          python scripts/retrigger_workflow.py
