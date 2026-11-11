@@ -4,6 +4,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 import { TelegramClient, Api } from "telegram";
 import { StringSession } from "telegram/sessions/index.js";
+import { NewMessage } from "telegram/events/index.js";
 
 dotenv.config();
 
@@ -25,6 +26,134 @@ app.use(express.json({ limit: "15mb" }));
 let tgClient = null;
 let isTgConnected = false;
 let connectionPromise = null;
+let isTgHandlerAttached = false;
+
+// Pending Telegram Verification Sessions (code -> session)
+const PENDING_TG_CODES = new Map();
+
+function setupTelegramAuthHandler(client) {
+  if (isTgHandlerAttached) return;
+  isTgHandlerAttached = true;
+  console.log("[Telegram Auth] Initializing incoming verification message listener...");
+
+  client.addEventHandler(async (event) => {
+    try {
+      const message = event.message;
+      if (!message || message.out) return; // Only process incoming messages
+
+      const rawText = (message.message || "").trim();
+      if (!rawText) return;
+
+      console.log(`[Telegram Auth] Incoming message from peer:`, message.peerId, `Text: "${rawText}"`);
+
+      // Match code: e.g. "AS-12345" or "12345"
+      const match = rawText.match(/AS-\d{4,6}/i) || rawText.match(/\b([A-Z0-9]{5,8})\b/i);
+      let foundCode = null;
+      let pending = null;
+
+      if (match) {
+        const candidate = match[0].toUpperCase();
+        if (PENDING_TG_CODES.has(candidate)) {
+          foundCode = candidate;
+          pending = PENDING_TG_CODES.get(candidate);
+        }
+      }
+
+      if (!pending) {
+        for (const [codeKey, record] of PENDING_TG_CODES.entries()) {
+          if (rawText.toUpperCase().includes(codeKey.toUpperCase())) {
+            foundCode = codeKey;
+            pending = record;
+            break;
+          }
+        }
+      }
+
+      if (!pending) {
+        console.log(`[Telegram Auth] No pending session found for: "${rawText}"`);
+        return;
+      }
+
+      console.log(`[Telegram Auth] MATCHED code ${foundCode} for user @${pending.username}!`);
+
+      // 1. REACTION TO INCOMING MESSAGE (Primary User Requirement)
+      try {
+        const chatInput = await message.getInputChat().catch(() => message.peerId);
+        await client.invoke(
+          new Api.messages.SendReaction({
+            peer: chatInput,
+            msgId: message.id,
+            reaction: [new Api.ReactionEmoji({ emoticon: "👍" })],
+          })
+        );
+        console.log(`[Telegram Auth] Reaction 👍 sent to message ${message.id}`);
+      } catch (reactErr) {
+        console.warn(`[Telegram Auth] Primary reaction failed, attempting fallback:`, reactErr.message);
+        try {
+          const chatInput = await message.getInputChat().catch(() => message.peerId);
+          await client.invoke(
+            new Api.messages.SendReaction({
+              peer: chatInput,
+              msgId: message.id,
+              reaction: [new Api.ReactionEmoji({ emoticon: "❤️" })],
+            })
+          );
+          console.log(`[Telegram Auth] Fallback reaction ❤️ sent!`);
+        } catch (_) {}
+      }
+
+      // 2. EXTRACT SENDER INFO
+      let senderInfo = {};
+      try {
+        const sender = await message.getSender();
+        if (sender) {
+          senderInfo = {
+            id: sender.id ? sender.id.toString() : null,
+            username: sender.username || null,
+            firstName: sender.firstName || "",
+            lastName: sender.lastName || "",
+            phone: sender.phone || null,
+          };
+        }
+      } catch (_) {}
+
+      // 3. REPLY CONFIRMATION
+      try {
+        await client.sendMessage(message.peerId, {
+          message: `✨ Verification Successful!\n\nWelcome to AS Cloud, @${pending.username}!\nYour account is now verified and logged in. Return to your browser to continue.`,
+          replyTo: message.id,
+        });
+      } catch (replyErr) {
+        console.warn("[Telegram Auth] Reply message warning:", replyErr.message);
+      }
+
+      // 4. MARK VERIFIED IN RELAY MEMORY
+      pending.status = "verified";
+      pending.telegramUser = senderInfo;
+      pending.verifiedAt = Date.now();
+      PENDING_TG_CODES.set(foundCode, pending);
+
+      // 5. NOTIFY MAIN VERCEL API
+      try {
+        await fetch("https://asllm.vercel.app/api/msg?action=tg_login_confirm", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            code: foundCode,
+            username: pending.username,
+            telegramUser: senderInfo,
+          }),
+        });
+        console.log(`[Telegram Auth] Notified main API of verified login for @${pending.username}`);
+      } catch (postErr) {
+        console.warn("[Telegram Auth] Could not notify main API:", postErr.message);
+      }
+
+    } catch (err) {
+      console.error("[Telegram Auth Event Handler Error]", err);
+    }
+  }, new NewMessage({ incoming: true }));
+}
 
 async function getTelegramClient() {
   if (tgClient && isTgConnected) return tgClient;
@@ -50,6 +179,9 @@ async function getTelegramClient() {
       await tgClient.connect();
       isTgConnected = true;
       console.log("[Telegram] Client connected successfully and active!");
+
+      setupTelegramAuthHandler(tgClient);
+
       return tgClient;
     } catch (err) {
       console.error("[Telegram] Connection error:", err);
@@ -306,6 +438,35 @@ app.get("/api/msg/poll", (req, res) => {
   const since = parseInt(req.query.since, 10) || 0;
   const filtered = RECENT_MESSAGES.filter((m) => m.receivedAt > since);
   res.json({ success: true, count: filtered.length, messages: filtered });
+});
+
+// ---------------------------------------------------------------------------
+// 4. Telegram Login & Verification Endpoints
+// ---------------------------------------------------------------------------
+app.post("/api/tg/register_code", (req, res) => {
+  const { code, username } = req.body || {};
+  if (!code || !username) {
+    return res.status(400).json({ success: false, error: "Missing code or username" });
+  }
+  const cleanCode = code.toUpperCase().trim();
+  const record = {
+    code: cleanCode,
+    username: username.toLowerCase().trim(),
+    status: "pending",
+    createdAt: Date.now(),
+    expiresAt: Date.now() + 10 * 60 * 1000,
+  };
+  PENDING_TG_CODES.set(cleanCode, record);
+  console.log(`[Telegram Auth] Registered code: ${cleanCode} for @${record.username}`);
+  res.json({ success: true, record });
+});
+
+app.get("/api/tg/check_code", (req, res) => {
+  const code = (req.query.code || "").toUpperCase().trim();
+  if (!code) return res.status(400).json({ success: false, error: "Missing code" });
+  const record = PENDING_TG_CODES.get(code);
+  if (!record) return res.json({ success: false, status: "not_found" });
+  res.json({ success: true, status: record.status, record });
 });
 
 // ---------------------------------------------------------------------------
