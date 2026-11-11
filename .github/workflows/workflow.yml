@@ -46,13 +46,10 @@ jobs:
 
       - name: 3. Install Cloudflared & Dependencies
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq curl build-essential
-          curl -L --output cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
-          sudo dpkg -i cloudflared.deb
-          rm cloudflared.deb
+          curl -sL --output cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          chmod +x cloudflared
+          sudo mv cloudflared /usr/local/bin/cloudflared
           npm install
-          python -m pip install requests
 
       - name: 4. Start Managed Server & Tunnel (~5-Hour Active Session)
         run: |

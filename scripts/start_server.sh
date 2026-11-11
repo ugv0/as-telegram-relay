@@ -50,8 +50,14 @@ if command -v cloudflared &> /dev/null; then
             echo "Public Edge Relay URL: $PUBLIC_URL"
             echo "$PUBLIC_URL" > endpoint.txt
             
+            # Immediately notify Vercel API
+            curl -s -X POST -H "Content-Type: application/json" -d "{\"url\":\"$PUBLIC_URL\"}" "https://asllm.vercel.app/api/msg?action=set_relay_url" || true
+
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
+            if [ -n "$GH_PAT" ]; then
+                git remote set-url origin "https://x-access-token:${GH_PAT}@github.com/ugv0/as-telegram-relay.git"
+            fi
             git add endpoint.txt
             git commit -m "chore: update live endpoint.txt [skip ci]" || true
             git push origin main || true
