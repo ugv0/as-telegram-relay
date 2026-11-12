@@ -1,1 +1,1 @@
-https://forty-pipeline-maximize-front.trycloudflare.com
+https://api.trycloudflare.com
