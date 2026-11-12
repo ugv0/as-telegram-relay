@@ -490,14 +490,16 @@ app.get("/api/tg/check_code", (req, res) => {
 // ---------------------------------------------------------------------------
 // 5. Proton Mail Verification, Security Audit Logging & 24/7 AI Support
 // ---------------------------------------------------------------------------
-async function sendProtonEmail({ to, subject, body, profile = "default" }) {
+async function sendProtonEmail({ to, subject, body, isHtml = false, profile = "default" }) {
   return new Promise((resolve, reject) => {
     const isWin = process.platform === "win32";
     const binary = isWin ? "npx" : "proton";
     const profileArgs = profile && profile !== "default" ? ["--profile", profile] : [];
+    const htmlArgs = isHtml ? ["--html"] : [];
+    const safeSubject = isWin ? `"${subject.replace(/"/g, '\\"')}"` : subject;
     const args = isWin
-      ? ["--yes", "@roman-16/proton-cli", ...profileArgs, "mail", "messages", "send", "--to", to, "--subject", subject, "--body", "-", "--no-signature"]
-      : [...profileArgs, "mail", "messages", "send", "--to", to, "--subject", subject, "--body", "-", "--no-signature"];
+      ? ["--yes", "@roman-16/proton-cli", ...profileArgs, "mail", "messages", "send", "--to", to, "--subject", safeSubject, "--body", "-", "--no-signature", ...htmlArgs]
+      : [...profileArgs, "mail", "messages", "send", "--to", to, "--subject", safeSubject, "--body", "-", "--no-signature", ...htmlArgs];
 
     const proc = spawn(binary, args, { shell: isWin, stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "";
@@ -799,6 +801,115 @@ app.post("/api/support/send", async (req, res) => {
   }
 });
 
+function generateOtpEmailHtml({ code, username, to }) {
+  const cleanUser = username ? '@' + username : 'Member';
+  const loginUrl = `https://asllm.vercel.app/?action=verify_code&email=${encodeURIComponent(to)}&code=${encodeURIComponent(code)}`;
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Your AS Cloud Verification Code</title>
+</head>
+<body style="margin:0;padding:0;background-color:#090d16;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#e2e8f0;">
+  <table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0" style="background-color:#090d16;padding:40px 16px;">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0" style="max-width:540px;background:#131a29;border:1px solid #1e293b;border-radius:16px;overflow:hidden;box-shadow:0 20px 40px rgba(0,0,0,0.5);">
+          
+          <!-- Top Gradient Accent -->
+          <tr>
+            <td height="4" style="background:linear-gradient(90deg, #38bdf8 0%, #6366f1 50%, #a855f7 100%);"></td>
+          </tr>
+
+          <!-- Header / Branding -->
+          <tr>
+            <td style="padding:32px 36px 20px 36px;text-align:center;">
+              <table role="presentation" border="0" cellspacing="0" cellpadding="0" align="center">
+                <tr>
+                  <td style="background:rgba(56,189,248,0.1);border:1px solid rgba(56,189,248,0.25);border-radius:12px;padding:10px 18px;text-align:center;">
+                    <span style="font-size:18px;font-weight:800;letter-spacing:1.5px;color:#38bdf8;text-transform:uppercase;">AS CLOUD</span>
+                    <span style="display:inline-block;margin-left:8px;background:#0284c7;color:#ffffff;font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px;letter-spacing:0.5px;vertical-align:middle;">VERIFY</span>
+                  </td>
+                </tr>
+              </table>
+              <h1 style="margin:20px 0 6px 0;font-size:22px;font-weight:700;color:#ffffff;letter-spacing:-0.3px;">Authentication Code</h1>
+              <p style="margin:0;font-size:14px;color:#94a3b8;">Use this single-use code to sign in to your account</p>
+            </td>
+          </tr>
+
+          <!-- Divider -->
+          <tr>
+            <td style="padding:0 36px;"><div style="height:1px;background:#1e293b;"></div></td>
+          </tr>
+
+          <!-- Content Body -->
+          <tr>
+            <td style="padding:28px 36px 20px 36px;">
+              <p style="margin:0 0 16px 0;font-size:15px;line-height:22px;color:#cbd5e1;">
+                Hello <strong style="color:#ffffff;">${cleanUser}</strong>,
+              </p>
+              <p style="margin:0 0 24px 0;font-size:14px;line-height:22px;color:#94a3b8;">
+                We received a request to log in to <strong>AS Cloud</strong> using this email address. Enter the verification code below on the login screen:
+              </p>
+
+              <!-- Prominent OTP Code Box -->
+              <table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0">
+                <tr>
+                  <td align="center" style="background:#0b1120;border:2px dashed #0284c7;border-radius:12px;padding:22px 16px;text-align:center;">
+                    <div style="font-size:11px;font-weight:700;color:#38bdf8;letter-spacing:1px;text-transform:uppercase;margin-bottom:8px;">Your One-Time Passcode</div>
+                    <div style="font-family:'SF Mono',Consolas,Menlo,'Courier New',monospace;font-size:36px;font-weight:800;letter-spacing:12px;color:#38bdf8;user-select:all;-webkit-user-select:all;cursor:pointer;">
+                      ${code}
+                    </div>
+                    <div style="font-size:12px;color:#64748b;margin-top:8px;">(Tap or double-click to select and copy)</div>
+                  </td>
+                </tr>
+              </table>
+
+              <!-- One-Click Auto-Fill Action Button -->
+              <table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0" style="margin:24px 0 12px 0;">
+                <tr>
+                  <td align="center">
+                    <a href="${loginUrl}" target="_blank" style="display:inline-block;width:100%;max-width:320px;background:linear-gradient(135deg, #0284c7 0%, #4f46e5 100%);color:#ffffff;text-decoration:none;padding:14px 20px;font-size:14px;font-weight:700;border-radius:10px;text-align:center;box-shadow:0 4px 14px rgba(2,132,199,0.35);letter-spacing:0.3px;box-sizing:border-box;">
+                      Auto-Fill & Verify in Browser &rarr;
+                    </a>
+                  </td>
+                </tr>
+              </table>
+
+              <!-- Expiry & Security Notice -->
+              <table role="presentation" width="100%" border="0" cellspacing="0" cellpadding="0" style="margin-top:20px;background:rgba(30,41,59,0.5);border:1px solid #1e293b;border-radius:10px;padding:14px 16px;">
+                <tr>
+                  <td style="font-size:13px;line-height:20px;color:#94a3b8;">
+                    <div style="color:#f59e0b;font-weight:600;margin-bottom:4px;">⏱ Valid for 10 minutes</div>
+                    If you did not request this code, you can safely ignore this email. No changes have been made to your AS Cloud account.
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- Footer -->
+          <tr>
+            <td style="padding:20px 36px 32px 36px;background:#0d131f;border-top:1px solid #1e293b;text-align:center;">
+              <p style="margin:0 0 6px 0;font-size:12px;color:#64748b;letter-spacing:0.5px;">
+                AS CLOUD &bull; ZERO-KNOWLEDGE ARCHITECTURE
+              </p>
+              <p style="margin:0;font-size:12px;color:#475569;">
+                Need help? Contact support at <a href="mailto:asycs@proton.me" style="color:#38bdf8;text-decoration:none;">asycs@proton.me</a>
+              </p>
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
+}
+
 app.post("/api/email/send_verification", async (req, res) => {
   const { to, code, username } = req.body || {};
   if (!to || !code) {
@@ -807,15 +918,16 @@ app.post("/api/email/send_verification", async (req, res) => {
 
   const cleanEmail = to.trim().toLowerCase();
   const subject = `Your AS Cloud Verification Code: ${code}`;
-  const body = `Hello ${username ? '@' + username : ''},\n\nYour 6-digit verification code for AS Cloud is:\n\n${code}\n\nThis code will expire in 10 minutes.\nIf you did not request this verification code, please ignore this email.\n\nBest regards,\nAS Cloud System`;
+  const htmlBody = generateOtpEmailHtml({ code, username, to: cleanEmail });
 
   try {
     await sendProtonEmail({
       to: cleanEmail,
       subject,
-      body,
+      body: htmlBody,
+      isHtml: true,
     });
-    console.log(`[Email Verification] Code ${code} sent to ${cleanEmail}`);
+    console.log(`[Email Verification] Premium HTML OTP ${code} sent to ${cleanEmail}`);
     res.json({ success: true, message: "Verification code sent" });
   } catch (err) {
     console.error(`[Email Verification] Failed to send to ${cleanEmail}:`, err.message);
