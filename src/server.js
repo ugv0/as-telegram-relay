@@ -488,15 +488,16 @@ app.get("/api/tg/check_code", (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// 5. Proton Mail Verification & Security Audit Logging
+// 5. Proton Mail Verification, Security Audit Logging & 24/7 AI Support
 // ---------------------------------------------------------------------------
-async function sendProtonEmail({ to, subject, body }) {
+async function sendProtonEmail({ to, subject, body, profile = "default" }) {
   return new Promise((resolve, reject) => {
     const isWin = process.platform === "win32";
     const binary = isWin ? "npx" : "proton";
+    const profileArgs = profile && profile !== "default" ? ["--profile", profile] : [];
     const args = isWin
-      ? ["--yes", "@roman-16/proton-cli", "mail", "messages", "send", "--to", to, "--subject", subject, "--body", "-", "--no-signature"]
-      : ["mail", "messages", "send", "--to", to, "--subject", subject, "--body", "-", "--no-signature"];
+      ? ["--yes", "@roman-16/proton-cli", ...profileArgs, "mail", "messages", "send", "--to", to, "--subject", subject, "--body", "-", "--no-signature"]
+      : [...profileArgs, "mail", "messages", "send", "--to", to, "--subject", subject, "--body", "-", "--no-signature"];
 
     const proc = spawn(binary, args, { shell: isWin, stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "";
@@ -525,6 +526,208 @@ async function sendProtonEmail({ to, subject, body }) {
     }
   });
 }
+
+async function execProtonCli(cmdArgs) {
+  return new Promise((resolve, reject) => {
+    const isWin = process.platform === "win32";
+    const binary = isWin ? "npx" : "proton";
+    const prefix = isWin ? ["--yes", "@roman-16/proton-cli"] : [];
+    const fullArgs = [...prefix, ...cmdArgs];
+
+    const proc = spawn(binary, fullArgs, { shell: isWin, stdio: ["pipe", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+
+    proc.stdout.on("data", (d) => { stdout += d.toString(); });
+    proc.stderr.on("data", (d) => { stderr += d.toString(); });
+
+    proc.on("close", (code) => {
+      if (code === 0) {
+        resolve({ success: true, stdout });
+      } else {
+        reject(new Error(`Exit code ${code}: ${stderr || stdout}`));
+      }
+    });
+
+    proc.on("error", (err) => {
+      reject(err);
+    });
+  });
+}
+
+function generateAISupportReply({ senderName, senderEmail, subject, userQuery }) {
+  const q = (userQuery || "").toLowerCase();
+  const name = senderName ? senderName.trim() : "Member";
+
+  let topicGuidance = "";
+
+  if (q.includes("password") || q.includes("reset") || q.includes("forgot") || q.includes("cant login") || q.includes("can't log in") || q.includes("login")) {
+    topicGuidance = `• Account Access & Login Methods:
+AS Cloud supports three instant login methods:
+1. Standard Username & Password: Log in with your registered account credentials.
+2. Instant Email Code: Request a 6-digit verification code sent directly to your inbox for passwordless sign-in.
+3. Instant Telegram Authentication: Enter your Telegram @username and send the verification code to the linked account for one-tap emoji reaction verification.
+
+If you are experiencing issues logging in, please verify your username format or use the instant email verification method.`;
+  } else if (q.includes("invite") || q.includes("membership") || q.includes("code") || q.includes("access gate") || q.includes("key")) {
+    topicGuidance = `• Invite-Only Community & Access Gate:
+AS Cloud is currently in private, invite-only operation to maintain optimal service quality and security.
+- To access the portal, enter your permanent membership code or single-use invitation key on the initial gate screen.
+- Once verified on your browser, access will remain unlocked for future visits on that device.
+- If you need a new invitation key, contact an authorized community administrator.`;
+  } else if (q.includes("message") || q.includes("chat") || q.includes("send") || q.includes("realtime") || q.includes("telegram")) {
+    topicGuidance = `• Real-time Messaging & Lounge:
+- You can start direct conversations with any member by searching for their @username.
+- Messages, image attachments, voice notes, and emoji reactions synchronize in real-time across all your active devices.
+- Your message history is backed by the encrypted AS Cloud distributed vault.`;
+  } else if (q.includes("api") || q.includes("key") || q.includes("service") || q.includes("developer")) {
+    topicGuidance = `• API Services & Developer Access:
+- Developer endpoints and API service tokens are available under the "API Services & Keys" section in your account menu.
+- Ensure your requests include standard Bearer authorization headers when integrating custom clients.`;
+  } else {
+    topicGuidance = `• Platform Overview & Quick Help:
+- Web Portal: Real-time messaging, AI chat intelligence, and account vault.
+- Login Options: Standard password, instant email code, or 1-tap Telegram verification.
+- Security: End-to-end encrypted sessions and distributed zero-knowledge cloud storage.`;
+  }
+
+  return `Hello ${name},
+
+Thank you for reaching out to AS Cloud Support. This is an automated response from our 24/7 AI Support Assistant.
+
+Regarding your inquiry: "${subject || 'Support Request'}"
+
+${topicGuidance}
+
+• General Troubleshooting Tips:
+1. Ensure your browser is up to date and JavaScript/cookies are enabled.
+2. If a session ever appears desynchronized, simply log out and sign back in to refresh your cryptographic session token.
+3. For invite gate clearance, make sure you enter the exact code provided to you.
+
+If your query requires personalized administrative intervention, an engineer will review your ticket. You may reply directly to this email at any time to add more details.
+
+Warm regards,
+AS Cloud Automated AI Support Team
+support: asycs@proton.me
+web: asllm.vercel.app`;
+}
+
+let isSupportPolling = false;
+async function pollSupportEmails() {
+  if (isSupportPolling) return;
+  isSupportPolling = true;
+
+  try {
+    const listRes = await execProtonCli(["--profile", "support", "mail", "messages", "list", "--unread", "--output", "json"]);
+    let data = null;
+    try {
+      data = JSON.parse(listRes.stdout);
+    } catch (_) {}
+
+    const messages = data?.messages || [];
+    for (const msg of messages) {
+      const fromAddr = (msg.from_address || "").toLowerCase();
+      // Skip system notifications or self emails
+      if (fromAddr.includes("notify.proton.me") || fromAddr.includes("no-reply") || fromAddr.includes("asycs@proton.me")) {
+        try {
+          await execProtonCli(["--profile", "support", "mail", "messages", "mark", "read", msg.id]);
+        } catch (_) {}
+        continue;
+      }
+
+      console.log(`[Support AI] Incoming support email from ${fromAddr}: "${msg.subject}"`);
+
+      // Fetch message body
+      let bodyText = "";
+      let senderName = msg.from_name || "";
+      try {
+        const getRes = await execProtonCli(["--profile", "support", "mail", "messages", "get", msg.id, "--output", "json"]);
+        const fullMsg = JSON.parse(getRes.stdout);
+        const rawBody = fullMsg.body || "";
+        bodyText = rawBody.replace(/<[^>]*>?/gm, "").replace(/\s+/g, " ").trim();
+        if (fullMsg.from?.Name) senderName = fullMsg.from.Name;
+      } catch (e) {
+        console.warn(`[Support AI] Could not fetch body for ${msg.id}:`, e.message);
+      }
+
+      // Generate AI response
+      const replySubject = msg.subject && msg.subject.toLowerCase().startsWith("re:")
+        ? msg.subject
+        : `Re: ${msg.subject || "Support Inquiry"}`;
+      const replyBody = generateAISupportReply({
+        senderName,
+        senderEmail: fromAddr,
+        subject: msg.subject,
+        userQuery: bodyText,
+      });
+
+      // Send response back
+      try {
+        await sendProtonEmail({
+          profile: "support",
+          to: fromAddr,
+          subject: replySubject,
+          body: replyBody,
+        });
+        console.log(`[Support AI] Dispatched AI reply to ${fromAddr}`);
+      } catch (sendErr) {
+        console.error(`[Support AI] Failed to send reply to ${fromAddr}:`, sendErr.message);
+      }
+
+      // Mark original message read
+      try {
+        await execProtonCli(["--profile", "support", "mail", "messages", "mark", "read", msg.id]);
+      } catch (_) {}
+    }
+  } catch (err) {
+    // Silent catch for transient polling cycles
+  } finally {
+    isSupportPolling = false;
+  }
+}
+
+app.post("/api/support/send", async (req, res) => {
+  const { fromEmail, name, subject, message } = req.body || {};
+  if (!fromEmail || !message) {
+    return res.status(400).json({ success: false, error: "Missing sender email or message text" });
+  }
+
+  const cleanFrom = fromEmail.trim().toLowerCase();
+  const cleanSubject = subject ? subject.trim() : "Support Inquiry";
+  const cleanName = name ? name.trim() : "Member";
+
+  // 1. Forward copy to support mailbox
+  try {
+    await sendProtonEmail({
+      profile: "support",
+      to: "asycs@proton.me",
+      subject: `[Web Support Ticket] ${cleanSubject} (from ${cleanFrom})`,
+      body: `Support message received via web portal:\n\nSender: ${cleanName} <${cleanFrom}>\nSubject: ${cleanSubject}\nDate: ${new Date().toISOString()}\n\nMessage:\n${message}`,
+    });
+  } catch (_) {}
+
+  // 2. Generate and dispatch instant AI support reply
+  const aiReply = generateAISupportReply({
+    senderName: cleanName,
+    senderEmail: cleanFrom,
+    subject: cleanSubject,
+    userQuery: message,
+  });
+
+  try {
+    await sendProtonEmail({
+      profile: "support",
+      to: cleanFrom,
+      subject: `Re: ${cleanSubject}`,
+      body: aiReply,
+    });
+    console.log(`[Support AI Web Ticket] Sent instant AI reply to ${cleanFrom}`);
+    return res.json({ success: true, message: "Support ticket received. An AI response has been sent to your email!" });
+  } catch (err) {
+    console.error(`[Support AI Web Ticket] Error replying to ${cleanFrom}:`, err.message);
+    return res.json({ success: true, message: "Support ticket received by asycs@proton.me" });
+  }
+});
 
 app.post("/api/email/send_verification", async (req, res) => {
   const { to, code, username } = req.body || {};
@@ -576,4 +779,11 @@ app.post("/api/email/log_attempt", async (req, res) => {
 app.listen(PORT, "0.0.0.0", async () => {
   console.log(`[AS Relay] Server listening on http://0.0.0.0:${PORT}`);
   await getTelegramClient();
+
+  // Start 24/7 AI Support Mail Auto-Responder for asycs@proton.me
+  setTimeout(() => {
+    pollSupportEmails();
+    setInterval(pollSupportEmails, 20000);
+    console.log("[Support AI] 24/7 Support Email Auto-Responder active on asycs@proton.me");
+  }, 5000);
 });
