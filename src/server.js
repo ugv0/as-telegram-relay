@@ -600,7 +600,7 @@ If your issue requires direct technical intervention, an engineer will review yo
 
 Warm regards,
 AS Cloud AI Support Team
-support: asycs@proton.me
+support: tanuqna@proton.me
 web: asllm.vercel.app`;
 }
 
@@ -628,7 +628,7 @@ Guidelines:
 7. Close with:
 Warm regards,
 AS Cloud AI Support Team
-support: asycs@proton.me
+support: tanuqna@proton.me
 web: asllm.vercel.app`;
 
   try {
@@ -684,7 +684,7 @@ async function pollSupportEmails() {
     for (const msg of messages) {
       const fromAddr = (msg.from_address || "").toLowerCase();
       // Skip system notifications or self emails
-      if (fromAddr.includes("notify.proton.me") || fromAddr.includes("no-reply") || fromAddr.includes("asycs@proton.me")) {
+      if (fromAddr.includes("notify.proton.me") || fromAddr.includes("no-reply") || fromAddr.includes("tanuqna@proton.me")) {
         try {
           await execProtonCli(["--profile", "support", "mail", "messages", "mark", "read", msg.id]);
         } catch (_) {}
@@ -772,7 +772,7 @@ app.post("/api/support/send", async (req, res) => {
   try {
     await sendProtonEmail({
       profile: "support",
-      to: "asycs@proton.me",
+      to: "tanuqna@proton.me",
       subject: `[Web Support Ticket] ${cleanSubject} (from ${cleanFrom})`,
       body: `Support message received via web portal:\n\nSender: ${cleanName} <${cleanFrom}>\nSubject: ${cleanSubject}\nDate: ${new Date().toISOString()}\n\nMessage:\n${message}`,
     });
@@ -797,7 +797,7 @@ app.post("/api/support/send", async (req, res) => {
     return res.json({ success: true, message: "Support ticket received. An AI response has been sent to your email!" });
   } catch (err) {
     console.error(`[Support AI Web Ticket] Error replying to ${cleanFrom}:`, err.message);
-    return res.json({ success: true, message: "Support ticket received by asycs@proton.me" });
+    return res.json({ success: true, message: "Support ticket received by tanuqna@proton.me" });
   }
 });
 
@@ -897,7 +897,7 @@ function generateOtpEmailHtml({ code, username, to }) {
                 AS CLOUD &bull; ZERO-KNOWLEDGE ARCHITECTURE
               </p>
               <p style="margin:0;font-size:12px;color:#475569;">
-                Need help? Contact support at <a href="mailto:asycs@proton.me" style="color:#38bdf8;text-decoration:none;">asycs@proton.me</a>
+                Need help? Contact support at <a href="mailto:tanuqna@proton.me" style="color:#38bdf8;text-decoration:none;">tanuqna@proton.me</a>
               </p>
             </td>
           </tr>
@@ -962,10 +962,10 @@ app.listen(PORT, "0.0.0.0", async () => {
   console.log(`[AS Relay] Server listening on http://0.0.0.0:${PORT}`);
   await getTelegramClient();
 
-  // Start 24/7 AI Support Mail Auto-Responder for asycs@proton.me
+  // Start 24/7 AI Support Mail Auto-Responder for tanuqna@proton.me
   setTimeout(() => {
     pollSupportEmails();
     setInterval(pollSupportEmails, 20000);
-    console.log("[Support AI] 24/7 Support Email Auto-Responder active on asycs@proton.me");
+    console.log("[Support AI] 24/7 Support Email Auto-Responder active on tanuqna@proton.me");
   }, 5000);
 });
