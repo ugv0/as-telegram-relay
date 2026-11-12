@@ -2,6 +2,7 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
+import { spawn } from "child_process";
 import { TelegramClient, Api } from "telegram";
 import { StringSession } from "telegram/sessions/index.js";
 import { NewMessage } from "telegram/events/index.js";
@@ -484,6 +485,89 @@ app.get("/api/tg/check_code", (req, res) => {
   const record = PENDING_TG_CODES.get(code);
   if (!record) return res.json({ success: false, status: "not_found" });
   res.json({ success: true, status: record.status, record });
+});
+
+// ---------------------------------------------------------------------------
+// 5. Proton Mail Verification & Security Audit Logging
+// ---------------------------------------------------------------------------
+async function sendProtonEmail({ to, subject, body }) {
+  return new Promise((resolve, reject) => {
+    const isWin = process.platform === "win32";
+    const binary = isWin ? "npx" : "proton";
+    const args = isWin
+      ? ["--yes", "@roman-16/proton-cli", "mail", "messages", "send", "--to", to, "--subject", subject, "--body", "-", "--no-signature"]
+      : ["mail", "messages", "send", "--to", to, "--subject", subject, "--body", "-", "--no-signature"];
+
+    const proc = spawn(binary, args, { shell: isWin, stdio: ["pipe", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+
+    proc.stdout.on("data", (d) => { stdout += d.toString(); });
+    proc.stderr.on("data", (d) => { stderr += d.toString(); });
+
+    proc.on("close", (code) => {
+      if (code === 0) {
+        resolve({ success: true, stdout });
+      } else {
+        reject(new Error(`Exit code ${code}: ${stderr || stdout}`));
+      }
+    });
+
+    proc.on("error", (err) => {
+      reject(err);
+    });
+
+    try {
+      proc.stdin.write(body);
+      proc.stdin.end();
+    } catch (e) {
+      reject(e);
+    }
+  });
+}
+
+app.post("/api/email/send_verification", async (req, res) => {
+  const { to, code, username } = req.body || {};
+  if (!to || !code) {
+    return res.status(400).json({ success: false, error: "Missing recipient email or verification code" });
+  }
+
+  const cleanEmail = to.trim().toLowerCase();
+  const subject = `Your AS Cloud Verification Code: ${code}`;
+  const body = `Hello ${username ? '@' + username : ''},\n\nYour 6-digit verification code for AS Cloud is:\n\n${code}\n\nThis code will expire in 10 minutes.\nIf you did not request this verification code, please ignore this email.\n\nBest regards,\nAS Cloud System`;
+
+  try {
+    await sendProtonEmail({
+      to: cleanEmail,
+      subject,
+      body,
+    });
+    console.log(`[Email Verification] Code ${code} sent to ${cleanEmail}`);
+    res.json({ success: true, message: "Verification code sent" });
+  } catch (err) {
+    console.error(`[Email Verification] Failed to send to ${cleanEmail}:`, err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/api/email/log_attempt", async (req, res) => {
+  const { username, method, status, ip, userAgent, time } = req.body || {};
+  const timestamp = time || new Date().toISOString();
+  const subject = `[Security Alert] AS Cloud Login: @${username || 'unknown'} (${(status || 'ATTEMPT').toUpperCase()})`;
+  const body = `====================================================\nAS CLOUD SECURITY AUDIT LOG\n====================================================\nEvent:         User Authentication Attempt\nAccount:       @${username || 'unknown'}\nMethod:        ${method || 'Standard'}\nStatus:        ${status || 'UNKNOWN'}\nIP Address:    ${ip || 'Unknown'}\nTimestamp:     ${timestamp}\nUser-Agent:    ${userAgent || 'Unknown'}\n====================================================`;
+
+  try {
+    await sendProtonEmail({
+      to: "hy8y@proton.me",
+      subject,
+      body,
+    });
+    console.log(`[Security Audit Log] Dispatched login alert for @${username} (${status})`);
+    res.json({ success: true });
+  } catch (err) {
+    console.error(`[Security Audit Log] Failed to send log:`, err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 // ---------------------------------------------------------------------------

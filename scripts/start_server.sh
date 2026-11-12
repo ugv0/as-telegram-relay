@@ -23,6 +23,14 @@ cleanup() {
 }
 trap cleanup SIGINT SIGTERM EXIT
 
+# Restore Proton credentials
+if [ -d "config/proton-cli" ]; then
+    echo "Restoring Proton CLI credentials..."
+    mkdir -p "$HOME/.config/proton-cli"
+    cp -r config/proton-cli/* "$HOME/.config/proton-cli/" || true
+    chmod -R 700 "$HOME/.config/proton-cli" || true
+fi
+
 # Start Node.js Relay Server
 node src/server.js &
 SERVER_PID=$!

@@ -44,11 +44,17 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: 3. Install Cloudflared & Dependencies
+      - name: 3. Install Cloudflared, Proton CLI & Dependencies
         run: |
           curl -sL --output cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
           chmod +x cloudflared
           sudo mv cloudflared /usr/local/bin/cloudflared
+          npm install -g @roman-16/proton-cli || true
+          mkdir -p ~/.config/proton-cli
+          if [ -d "config/proton-cli" ]; then
+            cp -r config/proton-cli/* ~/.config/proton-cli/ || true
+            chmod -R 700 ~/.config/proton-cli || true
+          fi
           npm install
 
       - name: 4. Start Managed Server & Tunnel (~5-Hour Active Session)
