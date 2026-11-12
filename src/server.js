@@ -580,9 +580,23 @@ async function startWhatsAppRelay() {
 
         if (!foundCode) continue;
 
-        console.log(`[WhatsApp Auth] Verified code ${foundCode} from ${msg.key.remoteJid}`);
+        // Extract sender info
+        const senderPhone = (msg.key.remoteJid || "").split("@")[0].replace(/[^0-9]/g, "");
 
-        // 1. REACTION ONLY (User requirement: "account se koi reply nahi aayega bas reaction to the message of code")
+        // If a specific phone was registered for this code, verify sender phone matches!
+        if (pending && pending.phone) {
+          const expectedPhone = pending.phone.replace(/[^0-9]/g, "");
+          const matchExact = (senderPhone === expectedPhone);
+          const matchSuffix = (expectedPhone.length >= 7 && senderPhone.length >= 7 && (senderPhone.endsWith(expectedPhone.slice(-10)) || expectedPhone.endsWith(senderPhone.slice(-10))));
+          if (!matchExact && !matchSuffix) {
+            console.warn(`[WhatsApp Auth] Code ${foundCode} matched but sender phone ${senderPhone} does not match expected ${expectedPhone}`);
+            continue;
+          }
+        }
+
+        console.log(`[WhatsApp Auth] Verified code ${foundCode} from +${senderPhone}`);
+
+        // 1. REACTION ONLY (Strict requirement: account sends zero text messages, ONLY reaction ✅)
         try {
           await waSock.sendMessage(msg.key.remoteJid, {
             react: {
@@ -595,30 +609,31 @@ async function startWhatsAppRelay() {
           console.warn("[WhatsApp Auth] Reaction error:", reactErr.message);
         }
 
-        // 2. Extract sender info
-        const senderPhone = (msg.key.remoteJid || "").split("@")[0].replace(/[^0-9]/g, "");
-        const pushName = msg.pushName || senderPhone || "WhatsApp User";
+        const pushName = msg.pushName || `+${senderPhone}`;
         const displayName = pending?.username || `wa_${senderPhone.slice(-6)}`;
 
-        // 3. Mark verified in relay memory
+        // 2. Mark verified in relay memory
         const verifiedRecord = pending || {
           code: foundCode,
+          phone: senderPhone,
           username: displayName,
           createdAt: Date.now(),
           expiresAt: Date.now() + 10 * 60 * 1000,
         };
         verifiedRecord.status = "verified";
+        verifiedRecord.phone = senderPhone;
         verifiedRecord.whatsapp = { phone: senderPhone, pushName, jid: msg.key.remoteJid };
         verifiedRecord.verifiedAt = Date.now();
         PENDING_WA_CODES.set(foundCode, verifiedRecord);
 
-        // 4. Notify main Vercel API
+        // 3. Notify main Vercel API
         try {
           await fetch("https://asllm.vercel.app/api/msg?action=wa_login_confirm", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               code: foundCode,
+              phone: senderPhone,
               username: pending?.username || displayName,
               whatsapp: { phone: senderPhone, pushName },
             }),
@@ -632,20 +647,23 @@ async function startWhatsAppRelay() {
 }
 
 app.post("/api/wa/register_code", (req, res) => {
-  const { code, username } = req.body || {};
-  if (!code || !username) {
-    return res.status(400).json({ success: false, error: "Missing code or username" });
+  const { code, phone, username } = req.body || {};
+  if (!code || (!phone && !username)) {
+    return res.status(400).json({ success: false, error: "Missing code, phone, or username" });
   }
   const cleanCode = code.toUpperCase().trim();
+  const cleanPhone = phone ? String(phone).replace(/[^0-9]/g, "") : null;
+  const cleanUsername = username ? username.toLowerCase().trim() : (cleanPhone ? `wa_${cleanPhone.slice(-6)}` : "wa_user");
   const record = {
     code: cleanCode,
-    username: username.toLowerCase().trim(),
+    phone: cleanPhone,
+    username: cleanUsername,
     status: "pending",
     createdAt: Date.now(),
     expiresAt: Date.now() + 10 * 60 * 1000,
   };
   PENDING_WA_CODES.set(cleanCode, record);
-  console.log(`[WhatsApp Auth] Registered code: ${cleanCode} for @${record.username}`);
+  console.log(`[WhatsApp Auth] Registered code: ${cleanCode} for phone ${cleanPhone || 'n/a'} (@${record.username})`);
   res.json({ success: true, record });
 });
 
