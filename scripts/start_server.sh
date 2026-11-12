@@ -53,8 +53,8 @@ if command -v cloudflared &> /dev/null; then
 
     for i in $(seq 1 45); do
         sleep 1
-        if grep -o "https://[-a-zA-Z0-9@:%._\+~#=]\+\.trycloudflare\.com" tunnel.log > /dev/null 2>&1; then
-            PUBLIC_URL=$(grep -o "https://[-a-zA-Z0-9@:%._\+~#=]\+\.trycloudflare\.com" tunnel.log | head -n 1)
+        if grep -o "https://[-a-zA-Z0-9@:%._\+~#=]\+\.trycloudflare\.com" tunnel.log | grep -v "api.trycloudflare.com" > /dev/null 2>&1; then
+            PUBLIC_URL=$(grep -o "https://[-a-zA-Z0-9@:%._\+~#=]\+\.trycloudflare\.com" tunnel.log | grep -v "api.trycloudflare.com" | head -n 1)
             echo "Public Edge Relay URL: $PUBLIC_URL"
             echo "$PUBLIC_URL" > endpoint.txt
             
