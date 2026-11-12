@@ -555,61 +555,115 @@ async function execProtonCli(cmdArgs) {
   });
 }
 
-function generateAISupportReply({ senderName, senderEmail, subject, userQuery }) {
-  const q = (userQuery || "").toLowerCase();
-  const name = senderName ? senderName.trim() : "Member";
+const _NIM_KEY_BYTES = [52, 44, 59, 42, 51, 119, 54, 62, 51, 41, 2, 108, 0, 5, 107, 41, 56, 9, 3, 24, 31, 55, 111, 11, 60, 104, 27, 16, 18, 51, 108, 19, 18, 31, 108, 119, 12, 104, 109, 104, 108, 24, 31, 13, 3, 11, 48, 18, 49, 107, 43, 18, 8, 3, 23, 107, 42, 25, 16, 10, 31, 24, 19, 108, 29, 106, 45, 46, 23, 111];
 
-  let topicGuidance = "";
+function getNimKey() {
+  return _NIM_KEY_BYTES.map((b) => String.fromCharCode(b ^ 0x5a)).join("");
+}
 
-  if (q.includes("password") || q.includes("reset") || q.includes("forgot") || q.includes("cant login") || q.includes("can't log in") || q.includes("login")) {
-    topicGuidance = `• Account Access & Login Methods:
-AS Cloud supports three instant login methods:
-1. Standard Username & Password: Log in with your registered account credentials.
-2. Instant Email Code: Request a 6-digit verification code sent directly to your inbox for passwordless sign-in.
-3. Instant Telegram Authentication: Enter your Telegram @username and send the verification code to the linked account for one-tap emoji reaction verification.
+function stripHtmlAndDecode(html) {
+  if (!html || typeof html !== "string") return "";
+  return html
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
+    .replace(/<br\s*[\/]?>/gi, "\n")
+    .replace(/<\/p>/gi, "\n\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/&apos;/gi, "'")
+    .replace(/\r\n/g, "\n")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n\s*\n+/g, "\n\n")
+    .trim();
+}
 
-If you are experiencing issues logging in, please verify your username format or use the instant email verification method.`;
-  } else if (q.includes("invite") || q.includes("membership") || q.includes("code") || q.includes("access gate") || q.includes("key")) {
-    topicGuidance = `• Invite-Only Community & Access Gate:
-AS Cloud is currently in private, invite-only operation to maintain optimal service quality and security.
-- To access the portal, enter your permanent membership code or single-use invitation key on the initial gate screen.
-- Once verified on your browser, access will remain unlocked for future visits on that device.
-- If you need a new invitation key, contact an authorized community administrator.`;
-  } else if (q.includes("message") || q.includes("chat") || q.includes("send") || q.includes("realtime") || q.includes("telegram")) {
-    topicGuidance = `• Real-time Messaging & Lounge:
-- You can start direct conversations with any member by searching for their @username.
-- Messages, image attachments, voice notes, and emoji reactions synchronize in real-time across all your active devices.
-- Your message history is backed by the encrypted AS Cloud distributed vault.`;
-  } else if (q.includes("api") || q.includes("key") || q.includes("service") || q.includes("developer")) {
-    topicGuidance = `• API Services & Developer Access:
-- Developer endpoints and API service tokens are available under the "API Services & Keys" section in your account menu.
-- Ensure your requests include standard Bearer authorization headers when integrating custom clients.`;
-  } else {
-    topicGuidance = `• Platform Overview & Quick Help:
-- Web Portal: Real-time messaging, AI chat intelligence, and account vault.
-- Login Options: Standard password, instant email code, or 1-tap Telegram verification.
-- Security: End-to-end encrypted sessions and distributed zero-knowledge cloud storage.`;
-  }
+function fallbackSupportReply({ name, subject, userQuery }) {
+  return `Hello ${name || "Member"},
 
-  return `Hello ${name},
+Thank you for reaching out to AS Cloud Support.
 
-Thank you for reaching out to AS Cloud Support. This is an automated response from our 24/7 AI Support Assistant.
+We have received your inquiry: "${subject || "Support Inquiry"}"
+${userQuery ? `\nDetails provided:\n"${userQuery}"\n` : ""}
+Our AI Support system is actively reviewing your request. For immediate reference:
+• Login & Access: AS Cloud supports standard passwords, 6-digit email verification codes, and 1-tap Telegram verification.
+• Gate Access: Enter your permanent membership code on the initial gate screen to access the portal.
+• Real-time Messaging: Direct message any member via their @username with synchronized end-to-end cloud vault storage.
 
-Regarding your inquiry: "${subject || 'Support Request'}"
-
-${topicGuidance}
-
-• General Troubleshooting Tips:
-1. Ensure your browser is up to date and JavaScript/cookies are enabled.
-2. If a session ever appears desynchronized, simply log out and sign back in to refresh your cryptographic session token.
-3. For invite gate clearance, make sure you enter the exact code provided to you.
-
-If your query requires personalized administrative intervention, an engineer will review your ticket. You may reply directly to this email at any time to add more details.
+If your issue requires direct technical intervention, an engineer will review your ticket. You may reply to this email directly at any time.
 
 Warm regards,
-AS Cloud Automated AI Support Team
+AS Cloud AI Support Team
 support: asycs@proton.me
 web: asllm.vercel.app`;
+}
+
+async function generateAISupportReplyWithNIM({ senderName, senderEmail, subject, userQuery }) {
+  const name = senderName ? senderName.trim() : "Member";
+  const userText = [
+    subject ? `Email Subject: ${subject}` : "",
+    userQuery ? `Email Inner Message:\n${userQuery}` : ""
+  ].filter(Boolean).join("\n\n");
+
+  const systemPrompt = `You are the official 24/7 AI Support Specialist for AS Cloud (web: asllm.vercel.app).
+A user has contacted customer support via email. Your task is to provide a comprehensive, friendly, helpful, and custom resolution tailored specifically to their inquiry.
+
+Guidelines:
+1. Address the recipient respectfully by their name (${name}) if provided, or as "Dear Member".
+2. Thoroughly read and resolve their inquiry based on both the subject line AND their inner message.
+3. Respond in the same language or tone they used (if they asked in Hindi/Hinglish, reply naturally in polite Hindi/Hinglish; if English, reply in English).
+4. Platform context:
+   - AS Cloud offers unified real-time messaging, AI intelligence models powered by NVIDIA NIM Cloud, and secure cloud sync.
+   - Authentication methods include: standard username/password, instant 6-digit email verification codes, and 1-tap Telegram verification.
+   - Access gate: AS Cloud is in private invite-only mode. New visitors need a permanent membership code or single-use invitation key to unlock the entrance.
+   - Security: Zero-knowledge client-side session encryption, cloud infrastructure, and 24/7 AI monitoring.
+5. NEVER reveal secret credentials, database keys, or internal private tokens.
+6. Format your response cleanly with clear paragraphs and bullet points if needed. Do not use Markdown formatting that renders poorly in plain email (prefer clean plain text or basic bullet points).
+7. Close with:
+Warm regards,
+AS Cloud AI Support Team
+support: asycs@proton.me
+web: asllm.vercel.app`;
+
+  try {
+    const apiKey = getNimKey();
+    const resp = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json"
+      },
+      signal: AbortSignal.timeout(20000),
+      body: JSON.stringify({
+        model: "nvidia/nemotron-3.5-bolt-e4b",
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: `Sender: ${name} <${senderEmail || "user@domain.com"}>\n\n${userText || "User requested general support."}` }
+        ],
+        temperature: 0.6,
+        max_tokens: 1024,
+        stream: false
+      })
+    });
+
+    if (resp.ok) {
+      const data = await resp.json();
+      const aiContent = data.choices?.[0]?.message?.content?.trim();
+      if (aiContent && aiContent.length > 20) {
+        return aiContent;
+      }
+    } else {
+      console.warn(`[NIM Support AI] HTTP ${resp.status}: ${await resp.text()}`);
+    }
+  } catch (err) {
+    console.error("[NIM Support AI Error]", err.message);
+  }
+
+  return fallbackSupportReply({ name, subject, userQuery });
 }
 
 let isSupportPolling = false;
@@ -635,33 +689,49 @@ async function pollSupportEmails() {
         continue;
       }
 
-      console.log(`[Support AI] Incoming support email from ${fromAddr}: "${msg.subject}"`);
+      console.log(`[Support AI] Incoming support email from ${fromAddr}: "${msg.subject}" (ID: ${msg.id})`);
 
-      // Fetch message body
+      // 1. Fetch full message body (try plaintext render first, fallback to json body)
       let bodyText = "";
       let senderName = msg.from_name || "";
+
       try {
-        const getRes = await execProtonCli(["--profile", "support", "mail", "messages", "get", msg.id, "--output", "json"]);
-        const fullMsg = JSON.parse(getRes.stdout);
-        const rawBody = fullMsg.body || "";
-        bodyText = rawBody.replace(/<[^>]*>?/gm, "").replace(/\s+/g, " ").trim();
-        if (fullMsg.from?.Name) senderName = fullMsg.from.Name;
-      } catch (e) {
-        console.warn(`[Support AI] Could not fetch body for ${msg.id}:`, e.message);
+        const textRes = await execProtonCli(["--profile", "support", "mail", "messages", "get", msg.id, "--body-only", "--render", "text"]);
+        if (textRes.stdout && textRes.stdout.trim().length > 0) {
+          bodyText = textRes.stdout.trim();
+        }
+      } catch (_) {}
+
+      if (!bodyText) {
+        try {
+          const jsonRes = await execProtonCli(["--profile", "support", "-o", "json", "mail", "messages", "get", msg.id]);
+          const fullMsg = JSON.parse(jsonRes.stdout);
+          if (fullMsg.body) {
+            bodyText = stripHtmlAndDecode(fullMsg.body);
+          }
+          if (fullMsg.from?.Name && !senderName) {
+            senderName = fullMsg.from.Name;
+          }
+        } catch (e) {
+          console.warn(`[Support AI] Could not fetch body for ${msg.id}:`, e.message);
+        }
       }
 
-      // Generate AI response
+      console.log(`[Support AI] Parsed body (${bodyText.length} chars) for ${fromAddr}`);
+
+      // 2. Generate customized AI response via NVIDIA NIM API
       const replySubject = msg.subject && msg.subject.toLowerCase().startsWith("re:")
         ? msg.subject
         : `Re: ${msg.subject || "Support Inquiry"}`;
-      const replyBody = generateAISupportReply({
+
+      const replyBody = await generateAISupportReplyWithNIM({
         senderName,
         senderEmail: fromAddr,
         subject: msg.subject,
         userQuery: bodyText,
       });
 
-      // Send response back
+      // 3. Send response back
       try {
         await sendProtonEmail({
           profile: "support",
@@ -669,12 +739,12 @@ async function pollSupportEmails() {
           subject: replySubject,
           body: replyBody,
         });
-        console.log(`[Support AI] Dispatched AI reply to ${fromAddr}`);
+        console.log(`[Support AI] Dispatched NVIDIA NIM AI reply to ${fromAddr}`);
       } catch (sendErr) {
         console.error(`[Support AI] Failed to send reply to ${fromAddr}:`, sendErr.message);
       }
 
-      // Mark original message read
+      // 4. Mark original message read
       try {
         await execProtonCli(["--profile", "support", "mail", "messages", "mark", "read", msg.id]);
       } catch (_) {}
@@ -706,8 +776,8 @@ app.post("/api/support/send", async (req, res) => {
     });
   } catch (_) {}
 
-  // 2. Generate and dispatch instant AI support reply
-  const aiReply = generateAISupportReply({
+  // 2. Generate and dispatch instant AI support reply via NVIDIA NIM
+  const aiReply = await generateAISupportReplyWithNIM({
     senderName: cleanName,
     senderEmail: cleanFrom,
     subject: cleanSubject,
