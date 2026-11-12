@@ -2,10 +2,15 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
+import fs from "fs";
+import path from "path";
 import { spawn } from "child_process";
 import { TelegramClient, Api } from "telegram";
 import { StringSession } from "telegram/sessions/index.js";
 import { NewMessage } from "telegram/events/index.js";
+import makeWASocket, { useMultiFileAuthState, DisconnectReason } from "@whiskeysockets/baileys";
+import QRCode from "qrcode";
+import pino from "pino";
 
 dotenv.config();
 
@@ -488,6 +493,206 @@ app.get("/api/tg/check_code", (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// 4b. WhatsApp Baileys Verification & Reaction Service
+// ---------------------------------------------------------------------------
+const PENDING_WA_CODES = new Map();
+let waSock = null;
+let waStatus = "disconnected";
+let waLinkedNumber = "919627404432";
+let currentWaQR = null;
+const waAuthDir = path.resolve("config/baileys_auth");
+
+async function startWhatsAppRelay() {
+  if (!fs.existsSync(waAuthDir)) fs.mkdirSync(waAuthDir, { recursive: true });
+
+  try {
+    const { state, saveCreds } = await useMultiFileAuthState(waAuthDir);
+    waStatus = "connecting";
+
+    waSock = makeWASocket({
+      auth: state,
+      logger: pino({ level: "silent" }),
+      printQRInTerminal: false,
+      browser: ["AS Cloud Relay", "Chrome", "124.0.0"],
+    });
+
+    waSock.ev.on("creds.update", saveCreds);
+
+    waSock.ev.on("connection.update", async (update) => {
+      const { connection, lastDisconnect, qr } = update;
+      if (qr) {
+        currentWaQR = await QRCode.toDataURL(qr, { width: 360, margin: 2 });
+        waStatus = "qr_ready";
+        console.log("[WhatsApp] New QR code ready at /api/wa/qr");
+      }
+
+      if (connection === "open") {
+        waStatus = "online";
+        currentWaQR = null;
+        waLinkedNumber = waSock.user?.id?.split(":")[0] || waLinkedNumber || "919627404432";
+        console.log(`[WhatsApp] Connected successfully as +${waLinkedNumber}`);
+      }
+
+      if (connection === "close") {
+        const reason = lastDisconnect?.error?.output?.statusCode;
+        const loggedOut = reason === DisconnectReason.loggedOut;
+        waStatus = loggedOut ? "logged_out" : "disconnected";
+        console.log(`[WhatsApp] Connection closed (reason: ${reason}, loggedOut: ${loggedOut})`);
+        if (!loggedOut) {
+          setTimeout(startWhatsAppRelay, 4000);
+        }
+      }
+    });
+
+    // Incoming WhatsApp verification listener
+    waSock.ev.on("messages.upsert", async ({ messages, type }) => {
+      if (type !== "notify") return;
+      for (const msg of messages) {
+        if (msg.key.fromMe || !msg.message) continue;
+        const rawText = (msg.message?.conversation || msg.message?.extendedTextMessage?.text || msg.message?.imageMessage?.caption || "").trim();
+        if (!rawText) continue;
+
+        console.log(`[WhatsApp Auth] Incoming message from ${msg.key.remoteJid}: "${rawText}"`);
+
+        // Match verification code (e.g. "AS-58291" or "58291")
+        const match = rawText.match(/AS-\d{4,6}/i) || rawText.match(/\b\d{5}\b/);
+        let foundCode = null;
+        let pending = null;
+
+        if (match) {
+          let candidate = match[0].toUpperCase();
+          if (/^\d{5}$/.test(candidate)) candidate = `AS-${candidate}`;
+          foundCode = candidate;
+          if (PENDING_WA_CODES.has(candidate)) {
+            pending = PENDING_WA_CODES.get(candidate);
+          }
+        }
+
+        if (!pending) {
+          for (const [codeKey, record] of PENDING_WA_CODES.entries()) {
+            if (rawText.toUpperCase().includes(codeKey.toUpperCase())) {
+              foundCode = codeKey;
+              pending = record;
+              break;
+            }
+          }
+        }
+
+        if (!foundCode) continue;
+
+        console.log(`[WhatsApp Auth] Verified code ${foundCode} from ${msg.key.remoteJid}`);
+
+        // 1. REACTION ONLY (User requirement: "account se koi reply nahi aayega bas reaction to the message of code")
+        try {
+          await waSock.sendMessage(msg.key.remoteJid, {
+            react: {
+              text: "✅",
+              key: msg.key,
+            },
+          });
+          console.log(`[WhatsApp Auth] Sent reaction ✅ to message ${msg.key.id}`);
+        } catch (reactErr) {
+          console.warn("[WhatsApp Auth] Reaction error:", reactErr.message);
+        }
+
+        // 2. Extract sender info
+        const senderPhone = (msg.key.remoteJid || "").split("@")[0].replace(/[^0-9]/g, "");
+        const pushName = msg.pushName || senderPhone || "WhatsApp User";
+        const displayName = pending?.username || `wa_${senderPhone.slice(-6)}`;
+
+        // 3. Mark verified in relay memory
+        const verifiedRecord = pending || {
+          code: foundCode,
+          username: displayName,
+          createdAt: Date.now(),
+          expiresAt: Date.now() + 10 * 60 * 1000,
+        };
+        verifiedRecord.status = "verified";
+        verifiedRecord.whatsapp = { phone: senderPhone, pushName, jid: msg.key.remoteJid };
+        verifiedRecord.verifiedAt = Date.now();
+        PENDING_WA_CODES.set(foundCode, verifiedRecord);
+
+        // 4. Notify main Vercel API
+        try {
+          await fetch("https://asllm.vercel.app/api/msg?action=wa_login_confirm", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              code: foundCode,
+              username: pending?.username || displayName,
+              whatsapp: { phone: senderPhone, pushName },
+            }),
+          });
+        } catch (_) {}
+      }
+    });
+  } catch (err) {
+    console.error("[WhatsApp Relay Init Error]", err.message);
+  }
+}
+
+app.post("/api/wa/register_code", (req, res) => {
+  const { code, username } = req.body || {};
+  if (!code || !username) {
+    return res.status(400).json({ success: false, error: "Missing code or username" });
+  }
+  const cleanCode = code.toUpperCase().trim();
+  const record = {
+    code: cleanCode,
+    username: username.toLowerCase().trim(),
+    status: "pending",
+    createdAt: Date.now(),
+    expiresAt: Date.now() + 10 * 60 * 1000,
+  };
+  PENDING_WA_CODES.set(cleanCode, record);
+  console.log(`[WhatsApp Auth] Registered code: ${cleanCode} for @${record.username}`);
+  res.json({ success: true, record });
+});
+
+app.get("/api/wa/check_code", (req, res) => {
+  const code = (req.query.code || "").toUpperCase().trim();
+  if (!code) return res.status(400).json({ success: false, error: "Missing code" });
+  const record = PENDING_WA_CODES.get(code);
+  if (!record) return res.json({ success: false, status: "not_found" });
+  res.json({ success: true, status: record.status, record });
+});
+
+app.get("/api/wa/status", (req, res) => {
+  res.json({
+    status: waStatus,
+    phone: waLinkedNumber || "919627404432",
+    hasQR: !!currentWaQR,
+  });
+});
+
+app.get("/api/wa/qr", (req, res) => {
+  if (req.query.format === "json") {
+    return res.json({ status: waStatus, qr: currentWaQR, phone: waLinkedNumber });
+  }
+  if (!currentWaQR) {
+    return res.send(`<html><body style="background:#090d16;color:#fff;font-family:sans-serif;text-align:center;padding:50px;">
+      <h2>${waStatus === "online" ? "WhatsApp is connected as +" + waLinkedNumber : "QR Code is not ready yet (" + waStatus + ")"}</h2>
+      <p>Refresh in a few seconds...</p>
+      <script>setTimeout(() => location.reload(), 3000);</script>
+    </body></html>`);
+  }
+  res.send(`<html><body style="background:#090d16;color:#fff;font-family:sans-serif;text-align:center;padding:40px;">
+    <h2>Scan to Link WhatsApp (AS Cloud)</h2>
+    <div style="background:#fff;padding:16px;display:inline-block;border-radius:12px;margin:20px 0;">
+      <img src="${currentWaQR}" width="320" height="320" style="display:block;" />
+    </div>
+    <p style="color:#94a3b8;">Open WhatsApp &rarr; Linked Devices &rarr; Link a Device</p>
+    <script>
+      setInterval(async () => {
+        const r = await fetch('/api/wa/status');
+        const d = await r.json();
+        if (d.status === 'online') location.reload();
+      }, 2000);
+    </script>
+  </body></html>`);
+});
+
+// ---------------------------------------------------------------------------
 // 5. Proton Mail Verification, Security Audit Logging & 24/7 AI Support
 // ---------------------------------------------------------------------------
 async function sendProtonEmail({ to, subject, body, isHtml = false, profile = "default" }) {
@@ -961,6 +1166,7 @@ app.post("/api/email/log_attempt", async (req, res) => {
 app.listen(PORT, "0.0.0.0", async () => {
   console.log(`[AS Relay] Server listening on http://0.0.0.0:${PORT}`);
   await getTelegramClient();
+  await startWhatsAppRelay();
 
   // Start 24/7 AI Support Mail Auto-Responder for tanuqna@proton.me
   setTimeout(() => {
